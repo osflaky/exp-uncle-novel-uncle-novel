@@ -1,0 +1,121 @@
+plugins {
+    id "io.spring.dependency-management" version "1.0.9.RELEASE" apply false
+    id "com.unclezs.gradle.sass" version "1.0.10" apply false
+}
+
+ext {
+    jfxProject = ['app', 'app-framework']
+    jfxProject = subprojects.findAll { jfxProject.contains(it.name) }
+}
+
+allprojects {
+    group = "com.unclezs.novel.app"
+    version = property("app.version")
+    description = "Uncle Novel Project"
+
+    repositories {
+        maven { url("https://oss.sonatype.org/content/groups/public/") }
+        mavenCentral()
+        google()
+    }
+}
+
+subprojects { project ->
+
+    apply plugin: "java"
+    apply from: "${rootDir}/gradle/publications.gradle"
+    apply from: "${rootDir}/gradle/dependency-management.gradle"
+
+    sourceSets {
+        main {
+            output.resourcesDir = java.classesDirectory
+            resources {
+                exclude '**/*.scss'
+            }
+        }
+    }
+
+    ext.compilerArgs = []
+    ext.runtimeArgs = []
+    // 模块化编译参数
+    File vmArgs = file("$projectDir/${project.name}.modularity")
+    if (vmArgs.exists()) {
+        vmArgs.readLines().each {
+            if (!it.isBlank() && !it.startsWith("//")) {
+                if (!it.startsWith("--add-opens")) {
+                    ext.compilerArgs.add(it)
+                }
+                ext.runtimeArgs.add(it)
+            }
+        }
+    }
+
+    tasks.withType(JavaCompile) {
+        options.fork = true
+        options.encoding = "UTF-8"
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+
+        // 模块化编译参数
+        options.compilerArgs.addAll(compilerArgs)
+    }
+
+    dependencies {
+        compileOnly "org.projectlombok:lombok"
+        annotationProcessor "org.projectlombok:lombok"
+        testImplementation "org.junit.jupiter:junit-jupiter-api"
+        testRuntimeOnly "org.junit.jupiter:junit-jupiter-engine"
+    }
+
+    test {
+        useJUnitPlatform()
+        include(["**/*Tests.class", "**/*Test.class"])
+    }
+}
+
+configure(jfxProject) { project ->
+    apply plugin: "org.openjfx.javafxplugin"
+    // 因为 jsass 不适配 mac m1，停用此插件，采用原生 saas 编译
+    // apply plugin: "com.unclezs.gradle.sass"
+
+    javafx {
+        version = "17.0.2"
+        modules = ["javafx.base", "javafx.controls", "javafx.fxml", "javafx.graphics", "javafx.media", "javafx.swing", "javafx.web"]
+    }
+
+    jar {
+        exclude "*.scss"
+    }
+
+    def compileScss = {
+        def scssDir = file("${sourceSets.main.resources.srcDirs[0]}/css")
+        for (final def file in fileTree(scssDir)) {
+            if (file.isDirectory()) {
+                continue
+            }
+            if (file.name.endsWith("scss") && !file.name.startsWith("_")) {
+                try {
+                    exec(new Action<ExecSpec>() {
+                        @Override
+                        void execute(ExecSpec es) {
+                            es.executable("sass")
+                            es.args("--no-source-map", "--no-charset", file.absolutePath, file.absolutePath.replace("scss", "css"))
+                        }
+                    })
+                } catch (ignored) {
+                    println "编译 scss 失败，请确认是否已经安装了 sass"
+                    return
+                }
+                println "compile scss to css: $file.name"
+            } else if (file.name.endsWith(".map")) {
+                file.delete()
+            }
+        }
+    }
+
+    tasks.withType(JavaCompile) {
+        doFirst {
+            compileScss()
+        }
+    }
+}

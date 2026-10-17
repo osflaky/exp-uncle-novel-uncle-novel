@@ -1,0 +1,321 @@
+import com.unclezs.novel.app.packager.task.PackageTask
+import com.unclezs.novel.app.packager.task.UpgradeTask
+import com.unclezs.novel.app.packager.util.ExecUtils
+import com.unclezs.novel.app.packager.util.FileUtils
+
+// prod / dev
+def profile = "prod"
+def debug = "dev" == profile
+buildscript {
+    repositories {
+        mavenCentral()
+        maven { url("https://oss.sonatype.org/content/groups/public/") }
+    }
+}
+
+dependencies {
+    implementation project(":app-localized")
+    implementation project(":app-framework")
+    implementation "ch.qos.logback:logback-classic"
+    implementation 'org.apache.velocity:velocity-engine-core'
+    implementation "com.j256.ormlite:ormlite-jdbc"
+    implementation "org.xerial:sqlite-jdbc"
+    implementation 'com.github.oshi:oshi-core'
+    implementation 'com.mixpanel:mixpanel-java'
+    implementation 'org.openjdk.nashorn:nashorn-core'
+}
+apply plugin: 'app-packager'
+
+def title = "Uncle小说"
+
+// 初始化本地运行环境
+def initAppRuntimeEnv() {
+    def runtimeDbFile = file("$rootDir/conf/core.db")
+    if (runtimeDbFile.exists()) {
+        return
+    }
+    def dbFile = file("$projectDir/db/core.db")
+    if (!dbFile.exists()) {
+        createDatabase()
+    }
+    FileUtils.copyFileToFile(dbFile, runtimeDbFile)
+}
+
+// 创建 database
+def createDatabase() {
+    def dbFile = file("$projectDir/db/core.db")
+    def sqlFile = file("$projectDir/db/init.sql")
+    dbFile.delete()
+    exec {
+        executable = "sqlite3"
+        args(dbFile.absolutePath, ".read " + sqlFile.absolutePath.replace(File.separator, '/'))
+    }
+    return dbFile
+}
+
+// 启动 APP
+tasks.register('runApp', JavaExec) {
+    dependsOn build
+    group "app"
+    // launch config
+    mainClass.set('com.unclezs.novel.app.main.App')
+    mainModule.set('com.unclezs.novel.app.main')
+    workingDir(rootDir)
+    if (System.getProperty("os.name").toLowerCase().contains("mac")) {
+        // macos dock icon
+        jvmArgs(
+                "-Xdock:icon=$projectDir/packager/icon/favicon.icns",
+                "-Xdock:name=$title",
+        )
+    }
+    jvmArgs(runtimeArgs)
+    // 换个写法
+    def modulePath = sourceSets.main.runtimeClasspath.join(File.pathSeparator)
+    jvmArgs("--module-path", modulePath)
+    // runtime config
+    initAppRuntimeEnv()
+}
+
+// 打包相关配置文件
+def packagerDir = "${projectDir}/packager"
+packager {
+    name = "uncle-novel"
+    displayName = "$title"
+    version = project.version
+    description = "$title"
+
+    url = "https://github.com/unclezs/uncle-novel"
+    organizationName = "unclezs"
+    organizationUrl = "https://blog.unclezs.com"
+    organizationEmail = "email@unclezs.com"
+
+    mainModule = "com.unclezs.jfx.launcher"
+    mainClass = 'com.unclezs.jfx.launcher.Launcher'
+    libsFolderPath = "libraries"
+
+    bundleJre = true
+    bundleFxJre = true
+    customizedJre = false
+    jreDirName = "runtime"
+    vmArgs = ["-Djava.util.logging.config.file=conf/jul.properties",
+              "--add-modules ALL-SYSTEM",
+              "-Dfile.encoding=UTF-8",
+              "--add-opens=java.base/java.lang=com.unclezs.jfx.launcher",
+              "-DmixPanel.token=${findProperty("mixPanel.token")}"]
+    vmOptionsFilePath = "conf/launcher.vmoptions"
+    vmOptionsFile = file("${packagerDir}/resource/conf/launcher.vmoptions")
+    linuxConfig {
+        iconFile = file("${packagerDir}/icon/favicon.png")
+        return linuxConfig
+    }
+    macConfig {
+        generateDmg = true
+        generatePkg = true
+        startScriptName = "startApplication"
+        appId = "com.unclezs.novel.app"
+        iconFile = file("${packagerDir}/icon/favicon.icns")
+        return macConfig
+    }
+    winConfig {
+        generateSetup = true
+        iconFile = file("${packagerDir}/icon/favicon.ico")
+        wrapJar = true
+        x64 = true
+        internalName = packager.name
+        companyName = "unclezs"
+        copyright = "app.unclezs.com"
+        fileDescription = title
+        productVersion = project.version
+        // inno setup配置
+        showSelectInstallDirPage = true
+        showSelectedProgramGroupPage = false
+        showFinishedPage = true
+        createDesktopIconTask = true
+        // 简体:GBK ， 繁体:UTF-8 BOM
+        setupLanguages.put("ChineseSimple", "${packagerDir}/inno-setup/language/chinese-simple.isl")
+        setupLanguages.put("ChineseTraditional", "${packagerDir}/inno-setup/language/chinese-traditional.isl")
+        return winConfig
+    }
+    launcher {
+        coordinate = "com.unclezs:jfx-launcher:${property("app.launcher.version")}"
+        withLibraries = true
+        // 资源位置映射、按照文件名和后缀映射到本地相对目录
+        resourceMapper = ["jar"      : "runtime/modules",
+                          "vmoptions": "conf",]
+        // 其他资源
+        resource("$packagerDir/bin/mac/kindlegen", null, "MAC", "bin")
+        resource("$packagerDir/bin/win/kindlegen.exe", null, "WIN", "bin")
+        resource("$packagerDir/bin/linux/kindlegen_linux", null, "LINUX", "bin")
+        resource("$packagerDir/fonts/pingfang-simple-bold.ttf", "fonts")
+        resource("$packagerDir/resource/conf/jul.properties", "conf")
+        resource("$packagerDir/resource/conf/launcher.vmoptions", "conf")
+        // 打包时使用
+        resource("$packagerDir/resource/conf/core.db", "conf")
+        if (debug) {
+            resource("$rootDir/conf/rules.json", "conf")
+        }
+        // url = outFile("$buildDir/server").toURI().toURL().toString()
+        url = "https://update-uncle-novel.unclezs.com/novel/${profile}"
+        // 配置文件在打包时已经确定，如果修改需要重新打包发布
+        configPath = "conf/app.json"
+        appName = packager.name
+        version = project.version
+        launchModule = "com.unclezs.novel.app.main"
+        launchClass = "com.unclezs.novel.app.main.App"
+        moduleOptions = file("$projectDir/app.modularity").readLines()
+        // 更新日志 , 最多显示5个版本的更新内容
+        changeLog = getChangelogs()
+        return launcher
+    }
+}
+
+def getChangelogs() {
+    def changeLogNum = 0
+    def changeLog = []
+    for (String line : file("$rootDir/CHANGELOG.md").readLines()) {
+        if (changeLogNum > 5) {
+            break
+        }
+        if (line.trim().blank || line.trim().empty || line.startsWith("###")) {
+            continue
+        }
+        if (line.startsWith("## ")) {
+            changeLogNum++
+            changeLog.add(line.replace("## ", "v"))
+            continue
+        }
+        changeLog.add(line)
+    }
+    return changeLog
+}
+
+tasks.register("runTest") {
+    doLast {
+        for (final String item in getChangelogs()) {
+            println item
+        }
+    }
+}
+
+tasks.register("genChangelog") {
+    group "packager"
+    doLast {
+        ExecUtils.exec("$rootDir/packager/changelog/changeloger",
+                "-file", "$rootDir/CHANGELOG.md",
+                "-out", "$rootDir/changelog-latest.md")
+    }
+}
+
+tasks.register('packageLinux', PackageTask) {
+    dependsOn build
+    group "packager"
+
+    description = "打Linux的的包，DEB、RPM"
+    platform = "linux"
+    createZip = false
+    generateInstaller = true
+}
+tasks.register('packageMac', PackageTask) {
+    dependsOn build
+    description = "打 Mac 的的包，DMG、PKG"
+    platform = "mac"
+    createZip = true
+    generateInstaller = true
+    // 从命令行获取 ./gradlew packageMac -PpkgArch=arm64
+    if (project.hasProperty("pkgArch")) {
+        arch = getProperty("pkgArch")
+    }
+}
+tasks.register('packageWin64', PackageTask) {
+    dependsOn build
+    group "packager"
+    description = "打64位Windows的包,EXE、Setup"
+    platform = "win"
+    createTar = false
+    createZip = true
+    generateInstaller = true
+}
+tasks.register('packageWin32', PackageTask) {
+    dependsOn build
+    group "packager"
+    description = "打32位Windows的包,EXE、Setup"
+    platform = "win"
+    // sudo setx /M JAVA_HOME_X86 G:/package/sdk/jdk/amazon/11.0.10_9
+    def javaHome = System.getenv("JAVA_HOME_X86")
+    if (javaHome != null) {
+        jdkPath = file(javaHome)
+    }
+    def fxHome = System.getenv("JAVAFX_HOME_X86")
+    // sudo setx /M JAVAFX_HOME_X86 G:/package/sdk/jfx/jmods-16-win-x86
+    if (fxHome != null) {
+        jfxPath = file(fxHome)
+    }
+    x64 = false
+    arch = "x86"
+    createZip = true
+    createTar = false
+    generateInstaller = true
+}
+tasks.register('packageAlone', PackageTask) {
+    dependsOn build
+    group "packager"
+    description = "打不带Launcher的包"
+    vmArgs = file("$projectDir/app.modularity").readLines()
+    enabledLauncher = false
+    createTar = false
+    createZip = false
+    generateInstaller = false
+    mainModule = "com.unclezs.novel.app.main"
+    mainClass = "com.unclezs.novel.app.main.App"
+}
+
+tasks.register("geUpgradePackage", UpgradeTask) {
+    dependsOn build
+    group "packager"
+    description = "生成并且部署升级相关文件"
+    dryRun = true
+    url = ""
+    outDir = file("$buildDir/upgrade")
+}
+
+tasks.register("updateVersion") {
+    if (!project.hasProperty("newVersion")) {
+        println "必须要设置 version，例如：-PnewVersion=5.0.9"
+        return
+    }
+    String newVersion = getProperty("newVersion")
+    newVersion = newVersion.trim().replace("v", "")
+    doLast {
+        def file = file("$rootDir/gradle.properties")
+        def content = file.getText()
+        content = content.replaceAll("app.version=.+", "app.version=$newVersion")
+        file.write(content)
+        println "更新版本号为：$newVersion"
+    }
+}
+
+tasks.register("upgradeWithHost", UpgradeTask) {
+    dependsOn build
+    group "packager"
+    description = "生成并且部署升级相关文件, 并发布到主机"
+    dryRun = true
+    rsync = false
+    url = "root@update-uncle-novel.unclezs.com:/novel/$profile"
+    outDir = file("$buildDir/upgrade")
+    // 排除不常更新，但是比较大的，全量更新时注释
+    excludes = ["bin", "fonts", "runtime/modules/sqlite-jdbc.jar", "runtime/modules/jfoenix.jar"]
+}
+
+tasks.register("upgradeWithGit", UpgradeTask) {
+    dependsOn build
+    group "packager"
+
+    description = "生成并且部署升级相关文件，并发布到 Github"
+    dryRun = false
+    rsync = false
+    // 和本项目同级的 upgrade 目录，用于存放升级文件
+    url = "file:$rootDir.parentFile/upgrade/novel/$profile"
+    outDir = file("$buildDir/upgrade")
+    // 排除不常更新，但是比较大的，全量更新时注释
+//    excludes = ["bin", "fonts", "runtime/modules/sqlite-jdbc.jar", "runtime/modules/jfoenix.jar"]
+}
