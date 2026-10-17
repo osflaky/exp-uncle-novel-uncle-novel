@@ -1,0 +1,25 @@
+name: test build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+        - java: 17
+          expander_leg: ubuntu-latest-17-x64
+      fail-fast: false
+    steps:
+    - uses: actions/checkout@v2
+    - name: Set up JDK ${{ matrix.java }}
+      uses: actions/setup-java@v3
+      with:
+        java-version: ${{ matrix.java }}
+        distribution: 'zulu'
+    - name: Build with Gradle
+      run: ./gradlew build -x test
+    name: build [${{ matrix.expander_leg }}]
+    timeout-minutes: 150
